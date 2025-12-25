@@ -1,0 +1,92 @@
+import pandas as pd
+
+df =pd.read_csv(r"/impactguru/kickstarter.csv")
+df = df.sample(n=10000, random_state=42)
+df = df.drop_duplicates()
+df = df.dropna(subset=["goal", "usd_pledged", "name", "category_name"])
+
+df["name"] = df["name"].str.lower()
+df["category"] = df["category_name"].str.lower()
+
+df["funding_ratio"] = df["usd_pledged"] / df["goal"]
+df.head()
+import torch
+from sentence_transformers import SentenceTransformer
+from sentence_transformers.util import cos_sim
+from langchain_groq import ChatGroq
+
+docs = []
+
+for category, group in df.groupby("category_name"):
+    avg_goal = group["goal"].mean()
+    success_rate = (group["state"] == "successful").mean()
+    avg_funding_ratio = group["funding_ratio"].mean()
+    project_count = len(group)
+
+    doc = (
+        f"Category: {category}. "
+        f"Number of projects: {project_count}. "
+        f"Average goal amount: {avg_goal:.2f}. "
+        f"Success rate: {success_rate:.2%}. "
+        f"Average funding ratio: {avg_funding_ratio:.2f}, "
+        f"indicating how much projects exceed their goals on average."
+    )
+
+    docs.append(doc)
+print(len(docs))
+import os
+groq = "gsk_GR4wnxJuLoKsK0u1..............FDvSQHYTqYpSo5z"  # Replace with your Groq API key
+os.environ['GROQ_API_KEY'] = groq
+
+
+# --------------------------------------------------
+# 5. EMBEDDINGS (OPEN SOURCE)
+# --------------------------------------------------
+embedder = SentenceTransformer("all-MiniLM-L6-v2")
+doc_embeddings = embedder.encode(docs, convert_to_tensor=True)
+
+# --------------------------------------------------
+# 6. RETRIEVER (IN-MEMORY)
+# --------------------------------------------------
+def retrieve_docs(query, top_n=3):
+    query_embedding = embedder.encode(query, convert_to_tensor=True)
+    scores = cos_sim(query_embedding, doc_embeddings)[0]
+    top_results = torch.topk(scores, k=top_n)
+    return [docs[idx] for idx in top_results.indices]
+
+
+llm = ChatGroq(
+    model="openai/gpt-oss-safeguard-20b",
+    temperature=0.2
+)
+# --------------------------------------------------
+# 8. RAG INSIGHT FUNCTION
+# --------------------------------------------------
+def get_insight_from_rag(query: str) -> str:
+    retrieved_docs = retrieve_docs(query)
+    context = "\n".join(retrieved_docs)
+
+    prompt = f"""
+You are an analyst answering questions using crowdfunding data.
+
+Context:
+{context}
+
+Question:
+{query}
+
+Answer clearly and concisely.
+"""
+
+    response = llm.invoke(prompt)
+    return response.content
+
+# --------------------------------------------------
+# 9. EXAMPLE RUN
+# --------------------------------------------------
+if __name__ == "__main__":
+    query = "Which crowdfunding categories perform the best?"
+    answer = get_insight_from_rag(query)
+    print("\nANSWER:\n")
+    print(answer)
+print(docs[:2])
